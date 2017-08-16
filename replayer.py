@@ -19,14 +19,14 @@ parser.add_argument(
     default='localhost',
 )
 parser.add_argument(
-    '--preserve-host',
-    action='store_true',
-    help='set host header from original file.',
+    '--replace-host',
+    action='store_false',
+    help='use host parameter for request Host header'
 )
 parser.add_argument(
     '--verbose',
     action='store_true',
-    help='print requests and responses',
+    help='always print requests and responses',
 )
 parser.add_argument(
     '--dry-run',
@@ -34,7 +34,7 @@ parser.add_argument(
     help='don\'t actually hit the `host`',
 )
 parser.add_argument(
-    '--asap',
+    '--paced',
     action='store_true',
     help='play requests as quickly as possible, not as they were in the original file'
 )
@@ -54,7 +54,7 @@ def replay_request(url, host, orig_resp):
         s = requests.Session()
         req = requests.Request('GET', 'http://{}{}?{}'.format(script_args.host, url.path, url.query))
         prepped = req.prepare()
-        if script_args.preserve_host:
+        if script_args.replace_host:
             prepped.headers['Host'] = host
         resp = s.send(prepped)
         if str(resp.status_code) == str(orig_resp):
@@ -70,38 +70,42 @@ def replay_request(url, host, orig_resp):
 def main():
     starting = None
     if script_args.limit:
-        counter = int(script_args.limit)
+        countdown = int(script_args.limit)
     else:
-        counter = None
+        countdown = None
     for line in open(script_args.logfile):
         bits = line.split()
-        timestamp = dateutil.parser.parse(bits[0])
-        if not starting:
-            starting = timestamp
-        offset = timestamp - starting
-        if offset.total_seconds() < 0:
-            # ignore past requests
-            continue
+        if script_args.paced:
+            timestamp = dateutil.parser.parse(bits[0])
+            if not starting:
+                starting = timestamp
+            offset = timestamp - starting
+            if offset.total_seconds() < 0:
+                # ignore past requests
+                continue
         method = bits[11].lstrip('"')
-        url = urlparse(bits[12])
         if method != 'GET':
             continue
+        url = urlparse(bits[12])
         orig_host = url.netloc.split(':')[0]
         orig_resp = bits[8]
-        if counter == 0:
+        if countdown == 0:
             break
         if script_args.limit:
-            counter -= 1
-        if script_args.asap or script_args.dry_run:
-            replay_request(url, orig_host, orig_resp)
-        else:
+            countdown -= 1
+        if script_args.paced:
             reactor.callLater(offset.total_seconds(), replay_request, url, orig_host, orig_resp)
+        else:
+            replay_request(url, orig_host, orig_resp)
 
-    if not script_args.asap:
+    if script_args.paced:
         reactor.callLater(offset.total_seconds() + 4, reactor.stop)
         reactor.run()
 
     print totals
 
 if __name__ == "__main__":
+    print script_args
+    if script_args.dry_run:
+        script_args.paced = False
     main()
