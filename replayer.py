@@ -102,11 +102,14 @@ def main():
         if script_args.paced:
             reactor.callLater(offset.total_seconds(), replay_request, url, orig_host, orig_resp)
         else:
-            replay_request(url, orig_host, orig_resp)
+            reactor.callInThread(replay_request, url, orig_host, orig_resp)
 
     if script_args.paced:
-        reactor.callLater(offset.total_seconds() + 4, reactor.stop)
-        reactor.run()
+        reactor.callLater(offset.total_seconds() + 2, reactor.stop)
+    else:
+        reactor.callFromThread(reactor.stop)
+
+    reactor.run()
 
     print totals
 
