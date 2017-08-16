@@ -4,6 +4,7 @@ import sys
 
 import dateutil.parser
 import requests
+import itertools
 from urlparse import urlparse
 
 from twisted.internet import reactor
@@ -11,6 +12,7 @@ from twisted.internet import reactor
 description = 'ELB Log Replayer (ELR)'
 totals = {'successful': 0, 'failed': 0}
 
+spinner = itertools.cycle(['-', '\\', '|', '/'])
 parser = argparse.ArgumentParser(description=description)
 parser.add_argument('logfile', help='the logfile to replay')
 parser.add_argument(
@@ -48,6 +50,10 @@ script_args = parser.parse_args()
 
 
 def replay_request(url, host, orig_resp):
+    if not script_args.verbose:
+        sys.stdout.write('\b')
+        sys.stdout.write(spinner.next())
+        sys.stdout.flush()
     if script_args.dry_run:
         sys.stdout.write('{}\n'.format(url))
     else:
