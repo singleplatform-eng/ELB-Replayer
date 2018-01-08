@@ -50,6 +50,11 @@ PARSER.add_argument(
     action='store_true',
     help='treat 404=>200 transitions as successes (for when spdj_gatekeeper_dummy_response is true)'
 )
+PARSER.add_argument(
+    '--output',
+    action='store',
+    help='store information about failed requests in output file'
+)
 
 SCRIPT_ARGS = PARSER.parse_args()
 
@@ -68,7 +73,7 @@ def replay_request(url, host, orig_resp):
         if SCRIPT_ARGS.replace_host:
             prepped.headers['Host'] = host
         resp = session.send(prepped)
-        if SCRIPT_ARGS.dummy and int(orig_resp) == 404 and int(resp.status_code) == 200:
+        if SCRIPT_ARGS.dummy and (int(orig_resp) == 404 or int(orig_resp) == 403) and int(resp.status_code) == 200:
             resp.status_code = 404
         if str(resp.status_code) == str(orig_resp):
             warning = ''
@@ -76,8 +81,12 @@ def replay_request(url, host, orig_resp):
         else:
             warning = 'WARNING'
             TOTALS['failed'] += 1
+            if SCRIPT_ARGS.output:
+                with open(SCRIPT_ARGS.output, 'a') as output:
+                    output.write('{}=>{} {} {}?{}\n'.format(orig_resp, resp.status_code, resp.reason, url.path, url.query))
         if SCRIPT_ARGS.verbose or warning == 'WARNING':
             print '{}=>{} {} {}?{}'.format(orig_resp, resp.status_code, warning, url.path, url.query)
+
 
 
 def main():
