@@ -5,9 +5,10 @@ import sys
 import dateutil.parser
 import requests
 import itertools
-from urlparse import urlparse
+from urlparse import urlparse, parse_qs
 
-from twisted.internet import reactor
+#from multiprocessing import Pool
+from multiprocessing.dummy import Pool
 
 SCRIPT_DESCRIPTION = 'ELB Log Replayer (ELR)'
 TOTALS = {'successful': 0, 'failed': 0}
@@ -36,11 +37,6 @@ PARSER.add_argument(
     help='don\'t actually hit the `host`',
 )
 PARSER.add_argument(
-    '--paced',
-    action='store_true',
-    help='play requests as quickly as possible, not as they were in the original file'
-)
-PARSER.add_argument(
     '--limit',
     action='store',
     help='replay only first n requests'
@@ -48,89 +44,101 @@ PARSER.add_argument(
 PARSER.add_argument(
     '--dummy',
     action='store_true',
-    help='treat 404=>200 transitions as successes (for when spdj_gatekeeper_dummy_response is true)'
+    help='treat [45]0x=>200 transitions as successes (for when spdj_gatekeeper_dummy_response is true)'
 )
 PARSER.add_argument(
     '--output',
     action='store',
     help='store information about failed requests in output file'
 )
+PARSER.add_argument(
+    '--suppress_keys_from',
+    action='store',
+    help='if supplied, suppress requests which use client ids in file'
+)
 
 SCRIPT_ARGS = PARSER.parse_args()
+keys_to_suppress = []
 
 
 def replay_request(url, host, orig_resp):
+    if SCRIPT_ARGS.dry_run:
+        sys.stdout.write('{}\n'.format(url))
+    else:
+        try:
+            session = requests.Session()
+            req = requests.Request('GET', 'http://{}{}?{}'.format(SCRIPT_ARGS.host, url.path, url.query))
+            prepped = req.prepare()
+            if SCRIPT_ARGS.replace_host:
+                prepped.headers['Host'] = host
+            resp = session.send(prepped)
+            if SCRIPT_ARGS.dummy and int(orig_resp) in [0,404,403,401,500,502,503,504] and int(resp.status_code) == 200:
+                resp.status_code = orig_resp
+            if SCRIPT_ARGS.dummy and int(orig_resp) == 403 and int(resp.status_code) == 401:
+                resp.status_code = orig_resp
+            if str(resp.status_code) == str(orig_resp):
+                warning = ''
+                TOTALS['successful'] += 1
+            else:
+                warning = 'WARNING'
+                TOTALS['failed'] += 1
+                if SCRIPT_ARGS.output:
+                    with open(SCRIPT_ARGS.output, 'a') as output:
+                        output.write('{}=>{} {} {}?{}\n'.format(orig_resp, resp.status_code, resp.reason, url.path, url.query))
+            if SCRIPT_ARGS.verbose or warning == 'WARNING':
+                print '{}=>{} {} {}?{}'.format(orig_resp, resp.status_code, warning, url.path, url.query)
+        except:
+            pass
+
+
+def process_line(line):
     if not SCRIPT_ARGS.verbose:
         sys.stdout.write('\b')
         sys.stdout.write(SPINNER.next())
         sys.stdout.flush()
-    if SCRIPT_ARGS.dry_run:
-        sys.stdout.write('{}\n'.format(url))
-    else:
-        session = requests.Session()
-        req = requests.Request('GET', 'http://{}{}?{}'.format(SCRIPT_ARGS.host, url.path, url.query))
-        prepped = req.prepare()
-        if SCRIPT_ARGS.replace_host:
-            prepped.headers['Host'] = host
-        resp = session.send(prepped)
-        if SCRIPT_ARGS.dummy and (int(orig_resp) == 404 or int(orig_resp) == 403) and int(resp.status_code) == 200:
-            resp.status_code = 404
-        if str(resp.status_code) == str(orig_resp):
-            warning = ''
-            TOTALS['successful'] += 1
-        else:
-            warning = 'WARNING'
-            TOTALS['failed'] += 1
-            if SCRIPT_ARGS.output:
-                with open(SCRIPT_ARGS.output, 'a') as output:
-                    output.write('{}=>{} {} {}?{}\n'.format(orig_resp, resp.status_code, resp.reason, url.path, url.query))
-        if SCRIPT_ARGS.verbose or warning == 'WARNING':
-            print '{}=>{} {} {}?{}'.format(orig_resp, resp.status_code, warning, url.path, url.query)
-
+    bits = line.split()
+    method = bits[11].lstrip('"')
+    if method != 'GET':
+        return
+    url = bits[12]
+    url = urlparse(url)
+    if SCRIPT_ARGS.suppress_keys_from:
+        client_id = parse_qs(url.query).get('client', None)
+        if client_id[0] in keys_to_suppress:
+            TOTALS['suppressed'] += 1
+            return
+    orig_host = url.netloc.split(':')[0]
+    orig_resp = bits[8]
+    replay_request(url, orig_host, orig_resp)
 
 
 def main():
+    pool = Pool(processes=32)
     starting = None
-    if SCRIPT_ARGS.limit:
-        countdown = int(SCRIPT_ARGS.limit)
-    else:
-        countdown = None
-    for line in open(SCRIPT_ARGS.logfile):
-        bits = line.split()
-        if SCRIPT_ARGS.paced:
-            timestamp = dateutil.parser.parse(bits[0])
-            if not starting:
-                starting = timestamp
-            offset = timestamp - starting
-            if offset.total_seconds() < 0:
-                # ignore past requests
-                continue
-        method = bits[11].lstrip('"')
-        if method != 'GET':
-            continue
-        url = urlparse(bits[12])
-        orig_host = url.netloc.split(':')[0]
-        orig_resp = bits[8]
-        if countdown == 0:
-            break
+    if SCRIPT_ARGS.suppress_keys_from:
+        with open(SCRIPT_ARGS.suppress_keys_from) as f:
+            for line in f:
+                keys_to_suppress.append(line.rstrip())
+        TOTALS.update({'suppressed': 0})
+    with open(SCRIPT_ARGS.logfile) as f:
         if SCRIPT_ARGS.limit:
-            countdown -= 1
-        if SCRIPT_ARGS.paced:
-            reactor.callLater(offset.total_seconds(), replay_request, url, orig_host, orig_resp)
+            countdown = int(SCRIPT_ARGS.limit)
+            for line in f:
+                if countdown == 0:
+                    break
+                countdown -= 1
+                process_line(line)
         else:
-            reactor.callInThread(replay_request, url, orig_host, orig_resp)
+            try:
+                pool.map(process_line, f)
+            except:
+                pass
 
-    if SCRIPT_ARGS.paced:
-        reactor.callLater(offset.total_seconds() + 2, reactor.stop)
-    else:
-        reactor.callFromThread(reactor.stop)
-
-    reactor.run()
+    pool.close()
+    pool.join()
 
     print TOTALS
 
 if __name__ == "__main__":
     print SCRIPT_ARGS
-    if SCRIPT_ARGS.dry_run:
-        SCRIPT_ARGS.paced = False
     main()
